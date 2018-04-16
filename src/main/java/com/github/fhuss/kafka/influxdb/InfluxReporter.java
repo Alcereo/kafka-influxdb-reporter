@@ -17,17 +17,15 @@
 package com.github.fhuss.kafka.influxdb;
 
 import com.yammer.metrics.core.*;
+import com.yammer.metrics.core.Timer;
 import com.yammer.metrics.reporting.AbstractPollingReporter;
 import com.yammer.metrics.stats.Snapshot;
+import org.influxdb.dto.Point;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.util.Arrays;
-import java.util.Iterator;
-import java.util.LinkedList;
-import java.util.List;
-import java.util.Map;
-import java.util.SortedMap;
+import java.util.*;
+import java.util.concurrent.TimeUnit;
 
 import static com.github.fhuss.kafka.influxdb.MetricsPredicate.Measures.*;
 
@@ -78,6 +76,18 @@ class InfluxReporter extends AbstractPollingReporter implements MetricProcessor<
     }
 
     private void printRegularMetrics(final Context context) {
+
+//        getMetricsRegistry().allMetrics().forEach((metricName, metric) -> {
+//            System.out.format("Metric: %s | %s | %s | %s | %s. Object: %s;\n",
+//                    metricName.getGroup(),
+//                    metricName.getType(),
+//                    metricName.getName(),
+//                    metricName.getScope(),
+//                    metricName.getMBeanName(),
+//                    metric
+//            );
+//        });
+
         for (Map.Entry<String, SortedMap<MetricName, Metric>> entry : getMetricsRegistry().groupedMetrics(DEFAULT_METRIC_PREDICATE).entrySet()) {
             for (Map.Entry<MetricName, Metric> subEntry : entry.getValue().entrySet()) {
                 final Metric metric = subEntry.getValue();
@@ -92,64 +102,70 @@ class InfluxReporter extends AbstractPollingReporter implements MetricProcessor<
         }
     }
 
+    private void processPoint(MetricName name, Context context, PointedConsumer consumer){
+        Point.Builder point = buildPoint(name, context);
+        consumer.consumePointBuilder(point);
+        nextBatchPoints.add(point.build());
+    }
+
     @Override
     public void processMeter(MetricName name, Metered meter, Context context) throws Exception {
-        Point point = buildPoint(name, context);
-        addMeteredFields(meter, point);
-        nextBatchPoints.add(point);
+        processPoint(name, context, pointBuilder ->
+                addMeteredFields(meter, pointBuilder)
+        );
     }
 
     @Override
     public void processCounter(MetricName name, Counter counter, Context context) throws Exception {
-        Point point = buildPoint(name, context);
-        filterOrAddField(count, point, counter.count());
-        nextBatchPoints.add(point);
+        processPoint(name, context, pointBuilder ->
+                filterOrAddField(count, pointBuilder, counter.count())
+        );
     }
 
     @Override
     public void processHistogram(MetricName name, Histogram histogram, Context context) throws Exception {
         final Snapshot snapshot = histogram.getSnapshot();
-        Point point = buildPoint(name, context);
-        addSummarizableFields(histogram, point);
-        addSnapshotFields(snapshot, point);
-        nextBatchPoints.add(point);
+        processPoint(name, context, pointBuilder -> {
+            addSummarizableFields(histogram, pointBuilder);
+            addSnapshotFields(snapshot, pointBuilder);
+        });
     }
 
     @Override
     public void processTimer(MetricName name, Timer timer, Context context) throws Exception {
         final Snapshot snapshot = timer.getSnapshot();
 
-        Point point = buildPoint(name, context);
-        addSummarizableFields(timer, point);
-        addMeteredFields(timer, point);
-        addSnapshotFields(snapshot, point);
-        filterOrAddField(count, point, timer.count());
-        nextBatchPoints.add(point);
+        processPoint(name, context, pointBuilder -> {
+            addSummarizableFields(timer, pointBuilder);
+            addMeteredFields(timer, pointBuilder);
+            addSnapshotFields(snapshot, pointBuilder);
+            filterOrAddField(count, pointBuilder, timer.count());
+        });
     }
 
     @Override
     public void processGauge(MetricName name, Gauge<?> gauge, Context context) throws Exception {
 
-        Point point = buildPoint(name, context);
-        Object fieldValue = gauge.value();
-        String fieldName = value.label();
-        if( fieldValue instanceof Float)
-            point.addField(fieldName, (Float)fieldValue);
-        else if( fieldValue instanceof Double)
-            point.addField(fieldName, (Double)fieldValue);
-        else if( fieldValue instanceof Long)
-            point.addField(fieldName, (Long)fieldValue);
-        else if( fieldValue instanceof Integer)
-            point.addField(fieldName, (Integer)fieldValue);
-        else if( fieldValue instanceof String)
-            point.addField(fieldName, (String)fieldValue);
-        else
-            return;
-        nextBatchPoints.add(point);
+        processPoint(name, context, pointBuilder -> {
+            Object fieldValue = gauge.value();
+            String fieldName = value.label();
+            if (fieldValue instanceof Float)
+                pointBuilder.addField(fieldName, (Float) fieldValue);
+            else if (fieldValue instanceof Double)
+                pointBuilder.addField(fieldName, (Double) fieldValue);
+            else if (fieldValue instanceof Long)
+                pointBuilder.addField(fieldName, (Long) fieldValue);
+            else if (fieldValue instanceof Integer)
+                pointBuilder.addField(fieldName, (Integer) fieldValue);
+            else if (fieldValue instanceof String)
+                pointBuilder.addField(fieldName, (String) fieldValue);
+            else
+                return;
+        });
     }
 
 
-    private void addSummarizableFields(Summarizable m, Point point) {
+    private void addSummarizableFields(Summarizable m, Point.Builder point) {
         filterOrAddField(max, point, m.max());
         filterOrAddField(mean, point, m.mean());
         filterOrAddField(min, point, m.min());
@@ -157,7 +173,7 @@ class InfluxReporter extends AbstractPollingReporter implements MetricProcessor<
         filterOrAddField(sum, point, m.sum());
     }
 
-    private void addMeteredFields(Metered m, Point point) {
+    private void addMeteredFields(Metered m, Point.Builder point) {
         filterOrAddField(m1Rate, point, m.oneMinuteRate());
         filterOrAddField(m5Rate, point, m.fiveMinuteRate());
         filterOrAddField(m15Rate, point, m.fifteenMinuteRate());
@@ -166,7 +182,7 @@ class InfluxReporter extends AbstractPollingReporter implements MetricProcessor<
 
     }
 
-    private void addSnapshotFields(Snapshot m, Point point) {
+    private void addSnapshotFields(Snapshot m, Point.Builder point) {
         filterOrAddField(median, point, m.getMedian());
         filterOrAddField(p75, point, m.get75thPercentile());
         filterOrAddField(p95, point, m.get95thPercentile());
@@ -175,27 +191,30 @@ class InfluxReporter extends AbstractPollingReporter implements MetricProcessor<
         filterOrAddField(p999, point, m.get999thPercentile());
     }
 
-    public void processVirtualMachine(VirtualMachineMetrics vm, Context context) throws Exception  {
-        Point point = new Point("JVM", context.getTime());
-        point.addField("memory.heap_used", vm.heapUsed());
-        point.addField("memory.heap_usage", vm.heapUsage());
-        point.addField("memory.non_heap_usage", vm.nonHeapUsage());
+    public void processVirtualMachine(VirtualMachineMetrics vm, Context context){
 
-        point.addField("daemon_thread_count", vm.daemonThreadCount());
-        point.addField("thread_count", vm.threadCount());
-        point.addField("uptime", vm.uptime());
-        point.addField("fd_usage", vm.fileDescriptorUsage());
+        MetricName metricName = new MetricName("JVM", "JVM", "JVM");
 
-        nextBatchPoints.add(point);
+        processPoint(metricName, context, pointBuilder -> {
+            pointBuilder.addField("memory.heap_used", vm.heapUsed());
+            pointBuilder.addField("memory.heap_usage", vm.heapUsage());
+            pointBuilder.addField("memory.non_heap_usage", vm.nonHeapUsage());
+
+            pointBuilder.addField("daemon_thread_count", vm.daemonThreadCount());
+            pointBuilder.addField("thread_count", vm.threadCount());
+            pointBuilder.addField("uptime", vm.uptime());
+            pointBuilder.addField("fd_usage", vm.fileDescriptorUsage());
+        });
     }
 
-    private void filterOrAddField(MetricsPredicate.Measures measure, Point point, double value) {
+    private void filterOrAddField(MetricsPredicate.Measures measure, Point.Builder point, double value) {
         if (predicate.isEnable(measure)) point.addField(measure.label(), value);
     }
 
-    private Point buildPoint(MetricName name, Context context) {
-        Point pb = new Point(name.getType(), context.getTime())
-                .addTag("metric", name.getName())
+    private Point.Builder buildPoint(MetricName name, Context context) {
+        Point.Builder pb = Point.measurement(name.getType())
+                .time(context.getTime(), TimeUnit.MILLISECONDS)
+                .tag("metric", name.getName())
                 .addField("group", name.getGroup());
 
         if( name.hasScope() ) {
@@ -205,12 +224,21 @@ class InfluxReporter extends AbstractPollingReporter implements MetricProcessor<
             if( scopes.size() % 2 == 0) {
                 Iterator<String> iterator = scopes.iterator();
                 while (iterator.hasNext()) {
-                    pb.addTag(iterator.next(), iterator.next());
+                    pb.tag(iterator.next(), iterator.next());
                 }
             }
-            else pb.addTag("scope", scope);
+            else pb.tag("scope", scope);
         }
         return pb;
+    }
+
+    public void close(){
+        client.close();
+    }
+
+    @FunctionalInterface
+    public interface PointedConsumer{
+        void consumePointBuilder(Point.Builder pointBuilder);
     }
 
     public interface Context {

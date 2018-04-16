@@ -16,131 +16,111 @@
  */
 package com.github.fhuss.kafka.influxdb;
 
-import org.asynchttpclient.*;
-import org.asynchttpclient.uri.Uri;
-import org.asynchttpclient.util.Base64;
+import org.influxdb.*;
+import org.influxdb.dto.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.io.BufferedWriter;
-import java.io.OutputStreamWriter;
-import java.nio.ByteBuffer;
-import java.nio.charset.Charset;
 import java.util.List;
-
-import com.github.fhuss.kafka.influxdb.internal.ByteBufferOutputStream;
 
 class InfluxDBClient {
 
     private static final Logger LOG = LoggerFactory.getLogger(InfluxDBClient.class);
 
-    private static final int BUFFER_ALLOC = 1024 * 64;
-
-    private static final Charset CHARSET = Charset.forName("UTF-8");
-
     private InfluxDBMetricsConfig config;
-
-    private AsyncHttpClient asyncHttpClient;
-    private ByteBufferOutputStream bbos;
 
     private boolean isDatabaseCreated = false;
 
-    private String credentials;
+    private final InfluxDB influxDB;
 
     /**
      * Creates a new {@link InfluxDBClient} instance.
      *
      * @param config the configuratoon.
      */
-    public InfluxDBClient(InfluxDBMetricsConfig config) {
+    public InfluxDBClient(InfluxDBMetricsConfig config) throws InfluxDBIOException {
         this.config = config;
 
-        DefaultAsyncHttpClientConfig.Builder builder = new DefaultAsyncHttpClientConfig.Builder();
-        this.asyncHttpClient = new DefaultAsyncHttpClient(builder.build());
-        this.bbos = new ByteBufferOutputStream(ByteBuffer.allocate(BUFFER_ALLOC));
+        influxDB = InfluxDBFactory.connect(
+                config.getConnectString(),
+                config.getUsername(),
+                config.getPassword()
+        );
 
-        this.credentials = Base64.encode((config.getUsername() + ":" + config.getPassword()).getBytes());
+        Pong ping = influxDB.ping();
 
-        createDatabase(this.config.getDatabase());
+        if (ping.isGood()){
+            LOG.info("Success connect to InfluxDB. Version: "+ping.getVersion());
+
+            influxDB.enableBatch(BatchOptions.DEFAULTS.actions(2000).flushDuration(100));
+        }else {
+            LOG.error("Error conenction to InfluxDB.");
+        }
+
     }
 
-    private boolean createDatabase(String database) {
+    public boolean createDatabase(String database) {
         try {
             LOG.info("Attempt to create InfluxDB database {}", database);
-            this.isDatabaseCreated = executeRequest(
-                    this.asyncHttpClient
-                        .prepareGet(this.config.getConnectString()  + "/query")
-                        .addQueryParam("q", "CREATE DATABASE " + database))
-                        .get();
+
+            QueryResult query = influxDB
+                    .query(new Query("CREATE DATABASE \"" + database + "\"", ""));
+
+            if (query.hasError()){
+                LOG.error("Error create database {}. Error: {}", database, query.getError());
+            }else {
+                this.isDatabaseCreated = true;
+            }
+
         } catch (Exception e) {
-            LOG.error("Cannot create database {}", database);
+            LOG.error("Exception while creating database: "+database, e);
         }
         return this.isDatabaseCreated;
     }
 
-    public void write(List<Point> points) throws Exception {
-        if (this.isDatabaseCreated || createDatabase(this.config.getDatabase())) {
-            ByteBuffer buffer = bbos.buffer();
-            buffer.clear();
-            OutputStreamWriter out = new OutputStreamWriter(bbos, CHARSET);
-            BufferedWriter writer = new BufferedWriter(out);
+    public boolean deleteDatabase(String database) {
+        try {
+            LOG.info("Attempt to delete InfluxDB database {}", database);
 
-            for (Point point : points) {
-                point.addTags(this.config.getTags()); // add additional tags before writing line.
-                writer.write(point.asLineProtocol());
-                writer.newLine();
+            QueryResult query = influxDB
+                    .query(new Query("DROP DATABASE \"" + database + "\"", ""));
+
+            if (query.hasError()){
+                LOG.error("Error drop database {}. Error: {}", database, query.getError());
+                return false;
             }
-            writer.flush();
 
-            buffer.flip();
-            RequestBuilder requestBuilder = new RequestBuilder()
-                    .setUri(Uri.create(this.config.getConnectString() + "/write"))
-                    .addQueryParam("db", this.config.getDatabase())
-                    .setMethod("POST")
-                    .addHeader("Authorization", "Basic " + credentials)
-                    .setBody(buffer);
+            return true;
+        } catch (Exception e) {
+            LOG.error("Exception while error database: "+database, e);
 
-            requestBuilder.addQueryParam("precision", "ms");
-            if( this.config.getRetention() != null)
-                requestBuilder.addQueryParam("rp", this.config.getRetention());
-            if( this.config.getConsistency() != null )
-                requestBuilder.addQueryParam("consistency", this.config.getConsistency());
-
-            BoundRequestBuilder request = asyncHttpClient.prepareRequest(requestBuilder.build());
-            executeRequest(request);
+            return false;
         }
     }
 
-    private ListenableFuture<Boolean> executeRequest(BoundRequestBuilder request) {
-        return request.execute(new AsyncHandler<Boolean>() {
-            @Override
-            public void onThrowable(Throwable throwable) {
-                LOG.warn("Cannot established connection to InfluxDB {}", throwable.getMessage());
-            }
-
-            @Override
-            public State onBodyPartReceived(HttpResponseBodyPart httpResponseBodyPart) throws Exception {
-                return null;
-            }
-
-            @Override
-            public State onStatusReceived(HttpResponseStatus httpResponseStatus) throws Exception {
-                int statusCode = httpResponseStatus.getStatusCode();
-                if (statusCode != 200 && statusCode != 204 ) {
-                    LOG.warn("Unexpected response status from InfluxDB '{}' - '{}'", statusCode, httpResponseStatus.getStatusText());
-                }
-                return null;
-            }
-
-            @Override
-            public State onHeadersReceived(HttpResponseHeaders httpResponseHeaders) throws Exception {
-                return null;
-            }
-
-            @Override
-            public Boolean onCompleted() throws Exception {
-                return true;
-            }
-        });
+    public void close(){
+        influxDB.close();
     }
+
+    public void write(List<Point> points) {
+        if (this.isDatabaseCreated || createDatabase(this.config.getDatabase())) {
+
+            BatchPoints.Builder batchBuilder = BatchPoints.database(this.config.getDatabase());
+
+            if( this.config.getRetention() != null)
+                batchBuilder.retentionPolicy(this.config.getRetention());
+            if( this.config.getConsistency() != null )
+                batchBuilder.consistency(InfluxDB.ConsistencyLevel.valueOf(this.config.getConsistency()));
+
+            points.forEach(batchBuilder::point);
+
+            try {
+                influxDB.write(batchBuilder.build());
+            }catch (InfluxDBException.FieldTypeConflictException exception){
+                LOG.warn("Field type conflict exception with points: "+points);
+            }
+
+        }
+    }
+
 }

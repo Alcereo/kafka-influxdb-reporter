@@ -67,7 +67,7 @@ public class KafkaInfluxMetricsReporter implements KafkaMetricsReporter, KafkaIn
 
     @Override
     public void stopReporter() {
-
+        reporter.close();
     }
 
     @Override
