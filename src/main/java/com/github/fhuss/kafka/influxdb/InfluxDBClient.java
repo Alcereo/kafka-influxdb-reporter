@@ -107,20 +107,54 @@ class InfluxDBClient {
 
             BatchPoints.Builder batchBuilder = BatchPoints.database(this.config.getDatabase());
 
-            if( this.config.getRetention() != null)
+            if (this.config.getRetention() != null)
                 batchBuilder.retentionPolicy(this.config.getRetention());
-            if( this.config.getConsistency() != null )
+            if (this.config.getConsistency() != null)
                 batchBuilder.consistency(InfluxDB.ConsistencyLevel.valueOf(this.config.getConsistency()));
 
-            points.forEach(batchBuilder::point);
+            int counter=0;
 
-            try {
-                influxDB.write(batchBuilder.build());
-            }catch (InfluxDBException.FieldTypeConflictException exception){
-                LOG.warn("Field type conflict exception with points: "+points);
+            for (Point point : points) {
+
+                batchBuilder.point(point);
+                counter++;
+
+                if (counter>10){
+                    try {
+                        influxDB.write(batchBuilder.build());
+                    }catch (InfluxDBException.FieldTypeConflictException exception){
+                        LOG.warn("Field type conflict exception with points: "+printPoints(batchBuilder.build().getPoints()));
+                    }
+
+                    batchBuilder = BatchPoints.database(this.config.getDatabase());
+                    if (this.config.getRetention() != null)
+                        batchBuilder.retentionPolicy(this.config.getRetention());
+                    if (this.config.getConsistency() != null)
+                        batchBuilder.consistency(InfluxDB.ConsistencyLevel.valueOf(this.config.getConsistency()));
+
+                    counter=0;
+                }
+            }
+
+
+            if (counter>0){
+                try {
+                    influxDB.write(batchBuilder.build());
+                }catch (InfluxDBException.FieldTypeConflictException exception){
+                    LOG.warn("Field type conflict exception with points: "+printPoints(batchBuilder.build().getPoints()));
+                }
             }
 
         }
+    }
+
+    private static String printPoints(List<Point> points) {
+        StringBuilder builder = new StringBuilder();
+
+        builder.append("list points: ").append("\n");
+        points.forEach(point -> builder.append(point).append("\n"));
+
+        return builder.toString();
     }
 
 }

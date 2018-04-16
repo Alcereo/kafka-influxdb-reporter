@@ -77,17 +77,6 @@ class InfluxReporter extends AbstractPollingReporter implements MetricProcessor<
 
     private void printRegularMetrics(final Context context) {
 
-//        getMetricsRegistry().allMetrics().forEach((metricName, metric) -> {
-//            System.out.format("Metric: %s | %s | %s | %s | %s. Object: %s;\n",
-//                    metricName.getGroup(),
-//                    metricName.getType(),
-//                    metricName.getName(),
-//                    metricName.getScope(),
-//                    metricName.getMBeanName(),
-//                    metric
-//            );
-//        });
-
         for (Map.Entry<String, SortedMap<MetricName, Metric>> entry : getMetricsRegistry().groupedMetrics(DEFAULT_METRIC_PREDICATE).entrySet()) {
             for (Map.Entry<MetricName, Metric> subEntry : entry.getValue().entrySet()) {
                 final Metric metric = subEntry.getValue();
@@ -214,8 +203,8 @@ class InfluxReporter extends AbstractPollingReporter implements MetricProcessor<
     private Point.Builder buildPoint(MetricName name, Context context) {
         Point.Builder pb = Point.measurement(name.getType())
                 .time(context.getTime(), TimeUnit.MILLISECONDS)
-                .tag("metric", name.getName())
-                .addField("group", name.getGroup());
+                .tag("metric", name.getName());
+//                .addField("group", name.getGroup());
 
         if( name.hasScope() ) {
             String scope = name.getScope();
