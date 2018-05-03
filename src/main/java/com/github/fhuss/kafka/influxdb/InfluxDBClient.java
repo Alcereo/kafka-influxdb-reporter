@@ -119,7 +119,7 @@ class InfluxDBClient {
                 batchBuilder.point(point);
                 counter++;
 
-                if (counter>10){
+                if (counter>200){
                     try {
                         influxDB.write(batchBuilder.build());
                     }catch (InfluxDBException.FieldTypeConflictException exception){
