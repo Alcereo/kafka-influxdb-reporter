@@ -94,7 +94,12 @@ class InfluxReporter extends AbstractPollingReporter implements MetricProcessor<
     private void processPoint(MetricName name, Context context, PointedConsumer consumer){
         Point.Builder point = buildPoint(name, context);
         consumer.consumePointBuilder(point);
-        nextBatchPoints.add(point.build());
+        try {
+            nextBatchPoints.add(point.build());
+        }catch (IllegalArgumentException exception){
+            LOG.warn("Error adding point to batch. Point: {}. Description: {}", point, exception.getLocalizedMessage());
+            exception.printStackTrace();
+        }
     }
 
     @Override
@@ -138,18 +143,24 @@ class InfluxReporter extends AbstractPollingReporter implements MetricProcessor<
         processPoint(name, context, pointBuilder -> {
             Object fieldValue = gauge.value();
             String fieldName = value.label();
-            if (fieldValue instanceof Float)
-                pointBuilder.addField(fieldName, (Float) fieldValue);
-            else if (fieldValue instanceof Double)
-                pointBuilder.addField(fieldName, (Double) fieldValue);
-            else if (fieldValue instanceof Long)
-                pointBuilder.addField(fieldName, (Long) fieldValue);
-            else if (fieldValue instanceof Integer)
-                pointBuilder.addField(fieldName, (Integer) fieldValue);
-            else if (fieldValue instanceof String)
-                pointBuilder.addField(fieldName, (String) fieldValue);
-            else
-                return;
+
+            if (name.getName().equals("NetworkProcessorAvgIdlePercent") && name.getType().equals("SocketServer")) {
+                pointBuilder.addField("percent", (Number) fieldValue);
+
+            }else if (name.getName().equals("ClusterId") && name.getType().equals("KafkaServer")){
+                pointBuilder.addField("name", fieldValue.toString());
+
+            }else if (name.getType().equals("ReplicaFetcherManager")){
+                pointBuilder.addField(fieldName, Double.valueOf(fieldValue.toString()));
+
+            }else {
+
+                if (fieldValue instanceof Number)
+                    pointBuilder.addField(fieldName, (Number) fieldValue);
+
+                else
+                    pointBuilder.addField(fieldName, fieldValue.toString());
+            }
         });
     }
 
