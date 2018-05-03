@@ -16,6 +16,7 @@
  */
 package com.github.fhuss.kafka.influxdb;
 
+import com.google.common.collect.Lists;
 import org.influxdb.*;
 import org.influxdb.dto.*;
 import org.slf4j.Logger;
@@ -105,47 +106,36 @@ class InfluxDBClient {
     public void write(List<Point> points) {
         if (this.isDatabaseCreated || createDatabase(this.config.getDatabase())) {
 
-            BatchPoints.Builder batchBuilder = BatchPoints.database(this.config.getDatabase());
+            Lists.partition(points, 200).forEach(pointBatchPart -> {
 
-            if (this.config.getRetention() != null)
-                batchBuilder.retentionPolicy(this.config.getRetention());
-            if (this.config.getConsistency() != null)
-                batchBuilder.consistency(InfluxDB.ConsistencyLevel.valueOf(this.config.getConsistency()));
+                BatchPoints.Builder batchBuilder = newPointsBatchBuilder(this.config);
+                pointBatchPart.forEach(batchBuilder::point);
 
-            int counter=0;
+                writePointsBatch(batchBuilder.build(), influxDB);
 
-            for (Point point : points) {
-
-                batchBuilder.point(point);
-                counter++;
-
-                if (counter>200){
-                    try {
-                        influxDB.write(batchBuilder.build());
-                    }catch (InfluxDBException.FieldTypeConflictException exception){
-                        LOG.warn("Field type conflict exception with points: "+printPoints(batchBuilder.build().getPoints()));
-                    }
-
-                    batchBuilder = BatchPoints.database(this.config.getDatabase());
-                    if (this.config.getRetention() != null)
-                        batchBuilder.retentionPolicy(this.config.getRetention());
-                    if (this.config.getConsistency() != null)
-                        batchBuilder.consistency(InfluxDB.ConsistencyLevel.valueOf(this.config.getConsistency()));
-
-                    counter=0;
-                }
-            }
-
-
-            if (counter>0){
-                try {
-                    influxDB.write(batchBuilder.build());
-                }catch (InfluxDBException.FieldTypeConflictException exception){
-                    LOG.warn("Field type conflict exception with points: "+printPoints(batchBuilder.build().getPoints()));
-                }
-            }
-
+            });
         }
+    }
+
+    private static void writePointsBatch(BatchPoints batchPoints, InfluxDB influxDB) {
+        try {
+            influxDB.write(batchPoints);
+        }catch (InfluxDBException.FieldTypeConflictException exception){
+            LOG.warn("Field type conflict exception with points: "+printPoints(batchPoints.getPoints()));
+        }catch (Exception e){
+            LOG.error("Error on write batch to InfluxDB", e);
+        }
+    }
+
+    private static BatchPoints.Builder newPointsBatchBuilder(InfluxDBMetricsConfig config) {
+        BatchPoints.Builder batchBuilder = BatchPoints.database(config.getDatabase());
+
+        if (config.getRetention() != null)
+            batchBuilder.retentionPolicy(config.getRetention());
+        if (config.getConsistency() != null)
+            batchBuilder.consistency(InfluxDB.ConsistencyLevel.valueOf(config.getConsistency()));
+
+        return batchBuilder;
     }
 
     private static String printPoints(List<Point> points) {
