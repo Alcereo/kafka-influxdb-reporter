@@ -45,8 +45,13 @@ public class KafkaInfluxMetricsReporter implements KafkaMetricsReporter, KafkaIn
             InfluxDBMetricsConfig config = new InfluxDBMetricsConfig(props);
             config.addTag("brokerId", props.getString("broker.id"));
 
-            this.reporter = new InfluxReporter(Metrics.defaultRegistry(), DEFAULT_NAME
-                    ,new InfluxDBClient(config), new MetricsPredicate(config.getPredicates()));
+            this.reporter = new InfluxReporter(
+                    Metrics.defaultRegistry(),
+                    DEFAULT_NAME,
+                    new InfluxDBClient(config),
+                    new MetricsPredicate(config.getPredicates()),
+                    config.getTags()
+            );
 
             if (props.getBoolean(InfluxDBMetricsConfig.KAFKA_INFLUX_METRICS_ENABLE, false)) {
                 initialized = true;
@@ -67,7 +72,7 @@ public class KafkaInfluxMetricsReporter implements KafkaMetricsReporter, KafkaIn
 
     @Override
     public void stopReporter() {
-
+        reporter.close();
     }
 
     @Override
