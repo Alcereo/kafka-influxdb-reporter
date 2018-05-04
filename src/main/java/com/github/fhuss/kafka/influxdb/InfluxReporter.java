@@ -16,6 +16,7 @@
  */
 package com.github.fhuss.kafka.influxdb;
 
+import com.sun.management.OperatingSystemMXBean;
 import com.yammer.metrics.core.*;
 import com.yammer.metrics.core.Timer;
 import com.yammer.metrics.reporting.AbstractPollingReporter;
@@ -23,6 +24,7 @@ import com.yammer.metrics.stats.Snapshot;
 import org.influxdb.dto.Point;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import sun.management.ManagementFactoryHelper;
 
 import java.util.*;
 import java.util.concurrent.TimeUnit;
@@ -46,11 +48,18 @@ class InfluxReporter extends AbstractPollingReporter implements MetricProcessor<
     private MetricsPredicate predicate;
 
     private VirtualMachineMetrics vm = VirtualMachineMetrics.getInstance();
+    OperatingSystemMXBean runtimeMXBean = (OperatingSystemMXBean) ManagementFactoryHelper.getOperatingSystemMXBean();
 
     /**
      * Creates a new {@link AbstractPollingReporter} instance.
      **/
-    InfluxReporter(MetricsRegistry registry, String name, InfluxDBClient client, MetricsPredicate predicate) {
+    InfluxReporter(
+            MetricsRegistry registry,
+            String name,
+            InfluxDBClient client,
+            MetricsPredicate predicate,
+            Map<String, String> tags
+    ) {
         super(registry, name);
         this.client = client;
         this.clock = Clock.defaultClock();
@@ -59,6 +68,11 @@ class InfluxReporter extends AbstractPollingReporter implements MetricProcessor<
             @Override
             public long getTime() {
                 return InfluxReporter.this.clock.time();
+            }
+
+            @Override
+            public Map<String, String> getTags(){
+                return tags;
             }
         };
     }
@@ -193,18 +207,113 @@ class InfluxReporter extends AbstractPollingReporter implements MetricProcessor<
 
     public void processVirtualMachine(VirtualMachineMetrics vm, Context context){
 
-        MetricName metricName = new MetricName("JVM", "JVM", "JVM");
+        //    ---  MEMORY ---
 
-        processPoint(metricName, context, pointBuilder -> {
-            pointBuilder.addField("memory.heap_used", vm.heapUsed());
-            pointBuilder.addField("memory.heap_usage", vm.heapUsage());
-            pointBuilder.addField("memory.non_heap_usage", vm.nonHeapUsage());
+        addJvmMeasurement(
+                context,
+                "JvmMemory",
+                "heap_max", "bytes",
+                vm.heapMax()
+        );
 
-            pointBuilder.addField("daemon_thread_count", vm.daemonThreadCount());
-            pointBuilder.addField("thread_count", vm.threadCount());
-            pointBuilder.addField("uptime", vm.uptime());
-            pointBuilder.addField("fd_usage", vm.fileDescriptorUsage());
-        });
+        addJvmMeasurement(
+                context,
+                "JvmMemory",
+                "heap_used", "bytes",
+                vm.heapUsed()
+        );
+
+        addJvmMeasurement(
+                context,
+                "JvmMemory",
+                "heap_committed", "bytes",
+                vm.heapCommitted()
+        );
+
+        addJvmMeasurement(
+                context,
+                "JvmMemory",
+                "heap_used", "percent",
+                vm.heapUsage()
+        );
+
+        addJvmMeasurement(
+                context,
+                "JvmMemory",
+                "non_heap_used", "percent",
+                vm.nonHeapUsage()
+        );
+
+        addJvmMeasurement(
+                context, "JvmMemory",
+                "total_used", "bytes",
+                vm.totalUsed()
+        );
+
+        addJvmMeasurement(
+                context, "JvmMemory",
+                "total_committed", "bytes",
+                vm.totalCommitted()
+        );
+
+        addJvmMeasurement(
+                context, "JvmMemory",
+                "total_max", "bytes",
+                vm.totalMax()
+        );
+
+        //    ---  THREADS ---
+
+        addJvmMeasurement(
+                context, "JvmThreads",
+                "daemon", "count",
+                vm.daemonThreadCount()
+        );
+
+        addJvmMeasurement(
+                context, "JvmThreads",
+                "all", "count",
+                vm.threadCount()
+        );
+
+        addJvmMeasurement(
+                context, "JvmThreads",
+                "deadlocked", "count",
+                vm.deadlockedThreads().size()
+        );
+
+        //    ---  THREAD STATUSES ---
+
+        vm.threadStatePercentages().forEach((state, aDouble) ->
+                addJvmMeasurement(
+                        context, "JvmThreadsStatuses",
+                        state.name(), "percent",
+                        aDouble
+                )
+        );
+
+        //    ---  CPU ---
+
+        addJvmMeasurement(
+                context, "JvmCPU",
+                "process", "load",
+                runtimeMXBean.getProcessCpuLoad()
+        );
+
+        addJvmMeasurement(
+                context, "JvmCPU",
+                "system", "load",
+                runtimeMXBean.getSystemCpuLoad()
+        );
+
+    }
+
+    private void addJvmMeasurement(Context context, String measurement, String tag, String field, Number value) {
+        processPoint(
+                new MetricName("JVM", measurement, tag),
+                context,
+                pointBuilder -> pointBuilder.addField(field, value)
+        );
     }
 
     private void filterOrAddField(MetricsPredicate.Measures measure, Point.Builder point, double value) {
@@ -212,10 +321,11 @@ class InfluxReporter extends AbstractPollingReporter implements MetricProcessor<
     }
 
     private Point.Builder buildPoint(MetricName name, Context context) {
-        Point.Builder pb = Point.measurement(name.getType())
+        Point.Builder pointBuilder = Point.measurement(name.getType())
                 .time(context.getTime(), TimeUnit.MILLISECONDS)
                 .tag("metric", name.getName());
-//                .addField("group", name.getGroup());
+
+        pointBuilder.tag(context.getTags());
 
         if( name.hasScope() ) {
             String scope = name.getScope();
@@ -224,12 +334,13 @@ class InfluxReporter extends AbstractPollingReporter implements MetricProcessor<
             if( scopes.size() % 2 == 0) {
                 Iterator<String> iterator = scopes.iterator();
                 while (iterator.hasNext()) {
-                    pb.tag(iterator.next(), iterator.next());
+                    pointBuilder.tag(iterator.next(), iterator.next());
                 }
             }
-            else pb.tag("scope", scope);
+            else pointBuilder.tag("scope", scope);
         }
-        return pb;
+
+        return pointBuilder;
     }
 
     public void close(){
@@ -244,5 +355,7 @@ class InfluxReporter extends AbstractPollingReporter implements MetricProcessor<
     public interface Context {
 
         long getTime( );
+
+        Map<String, String> getTags();
     }
 }
